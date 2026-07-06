@@ -1,8 +1,12 @@
 import os
+import datetime
+import time
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import time
+
 from model import Generator, Discriminator
 from dataset import get_loader
 
@@ -49,6 +53,13 @@ class Solver(object):
         D_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-D.ckpt')
         self.G.load_state_dict(torch.load(G_path, map_location=self.device))
         self.D.load_state_dict(torch.load(D_path, map_location=self.device))
+
+        # Restore optimizer states so training resumes with intact Adam momentum
+        opt_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-opt.ckpt')
+        if os.path.exists(opt_path):
+            opt_state = torch.load(opt_path, map_location=self.device)
+            self.g_optimizer.load_state_dict(opt_state['g_optimizer'])
+            self.d_optimizer.load_state_dict(opt_state['d_optimizer'])
         
     def get_latest_checkpoint(self):
         models_dir = self.config['model_save_dir']
@@ -62,7 +73,8 @@ class Solver(object):
         
     def train(self):
         # Data loader
-        data_loader = get_loader(self.config['image_dir'], self.config['image_size'], self.config['batch_size'])
+        data_loader = get_loader(self.config['image_dir'], self.config['image_size'], self.config['batch_size'],
+                                 self.config.get('num_workers', 4))
         
         # Losses
         criterion_cls = nn.CrossEntropyLoss()
@@ -80,7 +92,7 @@ class Solver(object):
         for i in range(start_iters, self.config['num_iters']):
             try:
                 x_real, label_org = next(data_iter)
-            except:
+            except StopIteration:
                 data_iter = iter(data_loader)
                 try:
                     x_real, label_org = next(data_iter)
@@ -155,12 +167,16 @@ class Solver(object):
             if (i+1) % self.config['model_save_step'] == 0:
                 G_path = os.path.join(self.config['model_save_dir'], f'{i+1}-G.ckpt')
                 D_path = os.path.join(self.config['model_save_dir'], f'{i+1}-D.ckpt')
+                opt_path = os.path.join(self.config['model_save_dir'], f'{i+1}-opt.ckpt')
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
+                torch.save({'g_optimizer': self.g_optimizer.state_dict(),
+                            'd_optimizer': self.d_optimizer.state_dict()}, opt_path)
+                # Keep a stable alias for the inference backend, which loads latest-G.ckpt
+                latest_path = os.path.join(self.config['model_save_dir'], 'latest-G.ckpt')
+                torch.save(self.G.state_dict(), latest_path)
                 print(f'Saved model checkpoints into {self.config["model_save_dir"]}...')
 
-import datetime
-import numpy as np
 
 if __name__ == '__main__':
     config = {
