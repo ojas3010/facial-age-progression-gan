@@ -16,19 +16,35 @@ function App() {
   const [resultImage, setResultImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [elapsedMs, setElapsedMs] = useState(null);
+
+  const loadFile = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image file (JPEG, PNG or WEBP).");
+      return;
+    }
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setSelectedImage(reader.result);
+    };
+    reader.readAsDataURL(file);
+    setResultImage(null); // Reset result on new upload
+    setError("");
+  };
 
   const handleImageUpload = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      setImageFile(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setSelectedImage(reader.result);
-      };
-      reader.readAsDataURL(file);
-      setResultImage(null); // Reset result on new upload
-      setError("");
-    }
+    loadFile(e.target.files[0]);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    loadFile(e.dataTransfer.files[0]);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
   };
 
   const handleProcess = async () => {
@@ -36,11 +52,13 @@ function App() {
 
     setLoading(true);
     setError("");
-    
+    setElapsedMs(null);
+
     const formData = new FormData();
     formData.append("file", imageFile);
     formData.append("target_age_group", targetAge.toString());
 
+    const t0 = performance.now();
     try {
       const response = await fetch("http://localhost:8000/api/progress_age", {
         method: "POST",
@@ -50,10 +68,11 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || "Failed to process image");
+        throw new Error(data.detail || data.message || "Failed to process image");
       }
 
       setResultImage(`data:image/jpeg;base64,${data.image_base64}`);
+      setElapsedMs(Math.round(performance.now() - t0));
     } catch (err) {
       setError(err.message || "Could not connect to the processing server.");
     } finally {
@@ -71,11 +90,11 @@ function App() {
         <div className="panel">
           <h2>Subject Input</h2>
           
-          <div className="upload-area">
-            <input 
-              type="file" 
-              accept="image/*" 
-              onChange={handleImageUpload} 
+          <div className="upload-area" onDrop={handleDrop} onDragOver={handleDragOver}>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleImageUpload}
             />
             {selectedImage ? (
               <img src={selectedImage} alt="Subject" className="preview-image" />
@@ -130,7 +149,19 @@ function App() {
               <p style={{fontSize: '0.8rem', color: '#6b7280'}}>Applying GAN transformations</p>
             </div>
           ) : resultImage ? (
-            <img src={resultImage} alt="Result" className="preview-image" />
+            <>
+              <img src={resultImage} alt="Result" className="preview-image" />
+              <div className="result-actions">
+                {elapsedMs !== null && (
+                  <span className="latency-badge">
+                    Synthesized in {(elapsedMs / 1000).toFixed(2)}s — {AGE_GROUPS[targetAge]}
+                  </span>
+                )}
+                <a href={resultImage} download="age_progression.jpg" className="download-link">
+                  Download Result
+                </a>
+              </div>
+            </>
           ) : (
             <div className="result-placeholder">
               <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{opacity: 0.3}}>

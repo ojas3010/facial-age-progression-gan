@@ -192,6 +192,37 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+.result-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  margin-top: 1rem;
+}
+
+.latency-badge {
+  color: #4ade80;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.download-link {
+  color: #3b82f6;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid #3b82f6;
+  border-radius: 8px;
+  padding: 0.4em 1em;
+  transition: all 0.25s;
+  white-space: nowrap;
+}
+
+.download-link:hover {
+  background: rgba(59, 130, 246, 0.15);
+}
+
 @media (max-width: 768px) {
   .dashboard {
     grid-template-columns: 1fr;
