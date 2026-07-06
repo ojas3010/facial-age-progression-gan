@@ -21,3 +21,6 @@ models/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# OS generated files (WSL/Windows ADS)
+*Zone.Identifier
