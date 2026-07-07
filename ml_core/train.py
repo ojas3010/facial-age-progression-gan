@@ -1,4 +1,5 @@
 import os
+import sys
 import datetime
 import time
 
@@ -7,8 +8,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from model import Generator, Discriminator
-from dataset import get_loader
+# Ensure ml_core is accessible as a package regardless of cwd (matches
+# ml_core/inference.py and backend/main.py)
+_ML_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.dirname(_ML_CORE_DIR))
+
+from ml_core.model import Generator, Discriminator
+from ml_core.dataset import get_loader
 
 def gradient_penalty(y, x, device):
     """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
@@ -188,7 +194,7 @@ if __name__ == '__main__':
         'd_lr': 0.0001,
         'beta1': 0.5,
         'beta2': 0.999,
-        'image_dir': 'data/utkface',
+        'image_dir': os.path.join(_ML_CORE_DIR, 'data/utkface'),
         'batch_size': 8,
         'num_iters': 100000,
         'n_critic': 5,
@@ -197,7 +203,7 @@ if __name__ == '__main__':
         'lambda_gp': 10,
         'log_step': 10,
         'model_save_step': 1000,
-        'model_save_dir': 'models'
+        'model_save_dir': os.path.join(_ML_CORE_DIR, 'models')
     }
     os.makedirs(config['model_save_dir'], exist_ok=True)
     solver = Solver(config)
