@@ -95,6 +95,7 @@ class Solver(object):
         start_time = time.time()
         
         data_iter = iter(data_loader)
+        g_loss = None  # unset until the first n_critic-th generator step
 
         # Fixed batch of real images for periodic sample-grid generation
         x_fixed, _ = next(iter(data_loader))
@@ -172,7 +173,8 @@ class Solver(object):
             if (i+1) % self.config['log_step'] == 0:
                 et = time.time() - start_time
                 et = str(datetime.timedelta(seconds=et))[:-7]
-                print(f"Elapsed [{et}], Iteration [{i+1}/{self.config['num_iters']}], D_loss [{d_loss.item():.4f}], G_loss [{g_loss.item():.4f}]")
+                g_loss_part = f", G_loss [{g_loss.item():.4f}]" if g_loss is not None else ""
+                print(f"Elapsed [{et}], Iteration [{i+1}/{self.config['num_iters']}], D_loss [{d_loss.item():.4f}]{g_loss_part}")
 
             # Save model checkpoints.
             if (i+1) % self.config['model_save_step'] == 0:
