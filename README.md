@@ -134,20 +134,32 @@ Place UTKFace images (filename format `[age]_[gender]_[race]_[date].jpg`) in `ml
 python ml_core/train.py
 ```
 
+### Getting the dataset
+
+UTKFace (Aligned & Cropped Faces, ~23k images) is distributed from the [UTKFace project page](https://susanqq.github.io/UTKFace/); mirrors also exist on Kaggle. Extract the `.jpg` files directly into `ml_core/data/utkface` — the loader parses the age from each filename and silently skips files that don't match the naming scheme.
+
+Training 100k iterations at 128px requires a CUDA GPU (roughly a day on a modern consumer card); CPU training is impractical. Without local CUDA, clone the repo on Colab/Kaggle, train there with the same command, and copy the resulting `ml_core/models/latest-G.ckpt` back for serving.
+
 `train.py` resolves its data and output paths relative to its own location, so it works from any working directory.
 
 ### Training pipeline
 
 ```mermaid
 flowchart TD
-    A[UTKFace images] --> B[Loader: resize 128, flip, normalize to -1..1]
+    A[UTKFace images] --> S[Deterministic 80/20 train/val split]
+    S --> B[Train loader: resize 128, flip, normalize to -1..1]
     B --> C{Each iteration}
     C --> D[Discriminator step<br/>real/fake + domain cls + gradient penalty]
     C --> E[Generator step every n_critic=5<br/>adversarial + domain cls + cycle L1]
     C --> F{Every 1000 iters}
     F --> G[Checkpoints: iter-G / iter-D / iter-opt<br/>+ latest-G.ckpt alias]
     F --> H[Sample grid PNG<br/>ml_core/samples/iter.png]
+    F --> V[Val D/G loss on fixed val batch]
 ```
+
+### Train/val split
+
+The loader splits the dataset 80/20 with a seeded permutation over the sorted file list, so the split is reproducible across runs — resuming training keeps the same val set. The val pipeline omits the horizontal-flip augmentation. At every checkpoint save, D and G losses on a fixed val batch are logged (the D val loss omits the gradient-penalty term, which requires gradients). Logging only — there is no early stopping.
 
 ### Checkpoints and resume
 
@@ -186,7 +198,7 @@ At every checkpoint, a fixed batch of 8 real images is translated to all 6 age d
 
 ```bash
 pip install pytest httpx
-python -m pytest tests -v            # 15 unit + API tests
+python -m pytest tests -v            # 17 unit + API tests
 python tests/smoke_train.py          # 10-iteration CPU training smoke test
 ```
 
@@ -198,7 +210,7 @@ The smoke test runs real training iterations on synthetic data and asserts check
 
 Every push and pull request runs two jobs on GitHub Actions:
 
-- **backend** — Python 3.12, CPU PyTorch, full pytest suite
+- **backend** — Python 3.12, CPU PyTorch, full pytest suite plus the training smoke test (checkpoint save + resume)
 - **frontend** — Node 22, ESLint, production Vite build
 
 ## Tech Stack

@@ -4,7 +4,7 @@ import torch
 from PIL import Image
 import numpy as np
 
-from ml_core.dataset import get_age_group, UTKFaceDataset
+from ml_core.dataset import get_age_group, get_loaders, UTKFaceDataset
 from ml_core.inference import label2onehot, AgeProgressor
 from ml_core.model import Generator, Discriminator
 
@@ -31,6 +31,19 @@ def test_dataset_skips_corrupted_filenames(tmp_path):
     Image.new("RGB", (64, 64)).save(tmp_path / "garbage.jpg")
     ds = UTKFaceDataset(str(tmp_path))
     assert len(ds) == 1
+
+
+def test_train_val_split_is_deterministic_and_disjoint(tmp_path):
+    for i in range(10):
+        Image.new("RGB", (64, 64)).save(tmp_path / f"{20 + i}_0_0_2017{i:04d}.jpg")
+    train_loader, val_loader = get_loaders(str(tmp_path), image_size=64, batch_size=2, num_workers=0)
+    train_idx = set(train_loader.dataset.indices)
+    val_idx = set(val_loader.dataset.indices)
+    assert len(train_idx) == 8 and len(val_idx) == 2
+    assert train_idx.isdisjoint(val_idx)
+    # Same seed, same directory: split must be identical on a rebuild
+    _, val_loader2 = get_loaders(str(tmp_path), image_size=64, batch_size=2, num_workers=0)
+    assert set(val_loader2.dataset.indices) == val_idx
 
 
 def test_label2onehot():

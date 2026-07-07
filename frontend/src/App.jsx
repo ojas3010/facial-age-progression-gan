@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
 const AGE_GROUPS = [
   "0 - 10 years",
   "11 - 20 years",
@@ -17,6 +19,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [elapsedMs, setElapsedMs] = useState(null);
+  const [resultAge, setResultAge] = useState(null);
 
   const loadFile = (file) => {
     if (!file) return;
@@ -29,6 +32,9 @@ function App() {
     reader.onloadend = () => {
       setSelectedImage(reader.result);
     };
+    reader.onerror = () => {
+      setError("Could not read the selected file.");
+    };
     reader.readAsDataURL(file);
     setResultImage(null); // Reset result on new upload
     setError("");
@@ -40,6 +46,7 @@ function App() {
 
   const handleDrop = (e) => {
     e.preventDefault();
+    if (loading) return; // a swap mid-request would mismatch input and result
     loadFile(e.dataTransfer.files[0]);
   };
 
@@ -50,28 +57,38 @@ function App() {
   const handleProcess = async () => {
     if (!imageFile) return;
 
+    const requestAge = targetAge; // pin to the value at request time
+
     setLoading(true);
     setError("");
     setElapsedMs(null);
 
     const formData = new FormData();
     formData.append("file", imageFile);
-    formData.append("target_age_group", targetAge.toString());
+    formData.append("target_age_group", requestAge.toString());
 
     const t0 = performance.now();
     try {
-      const response = await fetch("http://localhost:8000/api/progress_age", {
+      const response = await fetch(`${API_URL}/api/progress_age`, {
         method: "POST",
         body: formData,
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.detail || data.message || "Failed to process image");
+        // Error bodies may be non-JSON (proxy errors) or carry a non-string
+        // detail (FastAPI validation errors return an array)
+        let message = "Failed to process image";
+        try {
+          const errData = await response.json();
+          if (typeof errData.detail === "string") message = errData.detail;
+          else if (typeof errData.message === "string") message = errData.message;
+        } catch { /* keep generic message */ }
+        throw new Error(message);
       }
 
+      const data = await response.json();
       setResultImage(`data:image/jpeg;base64,${data.image_base64}`);
+      setResultAge(requestAge);
       setElapsedMs(Math.round(performance.now() - t0));
     } catch (err) {
       setError(err.message || "Could not connect to the processing server.");
@@ -95,6 +112,7 @@ function App() {
               type="file"
               accept="image/*"
               onChange={handleImageUpload}
+              disabled={loading}
             />
             {selectedImage ? (
               <img src={selectedImage} alt="Subject" className="preview-image" />
@@ -113,13 +131,14 @@ function App() {
           <div className="controls">
             <div className="slider-container">
               <label>Target Age Group: {AGE_GROUPS[targetAge]}</label>
-              <input 
-                type="range" 
-                min="0" 
-                max="5" 
-                step="1" 
-                value={targetAge} 
+              <input
+                type="range"
+                min="0"
+                max="5"
+                step="1"
+                value={targetAge}
                 onChange={(e) => setTargetAge(parseInt(e.target.value))}
+                disabled={loading}
               />
               <div className="age-labels">
                 <span>Infant</span>
@@ -154,7 +173,7 @@ function App() {
               <div className="result-actions">
                 {elapsedMs !== null && (
                   <span className="latency-badge">
-                    Synthesized in {(elapsedMs / 1000).toFixed(2)}s — {AGE_GROUPS[targetAge]}
+                    Synthesized in {(elapsedMs / 1000).toFixed(2)}s — {AGE_GROUPS[resultAge]}
                   </span>
                 )}
                 <a href={resultImage} download="age_progression.jpg" className="download-link">

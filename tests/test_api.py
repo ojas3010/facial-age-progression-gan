@@ -1,5 +1,6 @@
 """Integration tests for the FastAPI backend: endpoint schema, validation
 rules and error codes as specified in the project report (chapter 4)."""
+import base64
 import io
 
 import pytest
@@ -37,6 +38,10 @@ def test_progress_age_success(client):
     body = r.json()
     assert body["status"] == "success"
     assert isinstance(body["image_base64"], str) and len(body["image_base64"]) > 0
+    # Payload must decode to an actual 128x128 JPEG, not arbitrary bytes
+    out = Image.open(io.BytesIO(base64.b64decode(body["image_base64"])))
+    assert out.format == "JPEG"
+    assert out.size == (128, 128)
 
 
 def test_rejects_unsupported_mime_type(client):
@@ -82,3 +87,15 @@ def test_rejects_corrupt_image_bytes(client):
         data={"target_age_group": "2"},
     )
     assert r.status_code == 400
+
+
+def test_returns_500_when_model_not_initialized(client, monkeypatch):
+    import backend.main as backend_main
+
+    monkeypatch.setattr(backend_main, "progressor", None)
+    r = client.post(
+        "/api/progress_age",
+        files={"file": ("face.jpg", jpeg_bytes(), "image/jpeg")},
+        data={"target_age_group": "2"},
+    )
+    assert r.status_code == 500

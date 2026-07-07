@@ -18,6 +18,8 @@ jobs:
           pip install -r backend/requirements.txt pytest httpx
       - name: Run tests
         run: python -m pytest tests -v
+      - name: Training smoke test (checkpoint save + resume)
+        run: python tests/smoke_train.py
 
   frontend:
     runs-on: ubuntu-latest

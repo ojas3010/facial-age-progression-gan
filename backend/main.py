@@ -78,8 +78,9 @@ async def progress_age(
             detail="target_age_group must be an integer between 0 and 5."
         )
 
-    # Read the uploaded image into memory, enforcing the payload size limit
-    contents = await file.read()
+    # Read at most limit+1 bytes so an oversized upload is rejected without
+    # ever loading the full payload into memory
+    contents = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=400,
@@ -103,8 +104,9 @@ async def progress_age(
         return {"status": "success", "image_base64": img_str}
 
     except Exception as e:
+        # Log the details server-side; never echo internals to the client
         print(f"Error processing image: {e}")
-        return JSONResponse(status_code=500, content={"message": str(e)})
+        return JSONResponse(status_code=500, content={"message": "Image processing failed."})
 
 
 if __name__ == "__main__":

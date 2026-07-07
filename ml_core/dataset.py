@@ -1,6 +1,7 @@
+import copy
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision import transforms
 from PIL import Image
 
@@ -25,7 +26,9 @@ class UTKFaceDataset(Dataset):
         self.labels = []
         
         if os.path.exists(image_dir):
-            for filename in os.listdir(image_dir):
+            # Sorted so the file order (and any index-based split) is
+            # reproducible across runs and platforms
+            for filename in sorted(os.listdir(image_dir)):
                 if filename.endswith('.jpg') or filename.endswith('.png'):
                     parts = filename.split('_')
                     if len(parts) >= 1:
@@ -71,3 +74,51 @@ def get_loader(image_dir, image_size=128, batch_size=16, num_workers=4):
                              shuffle=True,
                              num_workers=num_workers)
     return data_loader
+
+def get_loaders(image_dir, image_size=128, batch_size=16, num_workers=4, val_frac=0.2, seed=42):
+    """Builds train/val DataLoaders with a deterministic 80/20 split.
+
+    The split is a seeded permutation over the sorted file list, so it is
+    reproducible across runs (training resume keeps the same val set).
+    The val dataset omits RandomHorizontalFlip. Returns (train_loader,
+    val_loader); val_loader is None when the dataset is too small to
+    yield a val sample.
+    """
+    train_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+    val_transform = transforms.Compose([
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    # Single directory listing shared by both splits: two separate
+    # UTKFaceDataset instances could observe different directory contents
+    # between calls and desync the index permutation from dataset length.
+    train_dataset = UTKFaceDataset(image_dir, train_transform)
+    val_dataset = copy.copy(train_dataset)
+    val_dataset.transform = val_transform
+
+    if len(train_dataset) == 0:
+        print(f"Warning: No valid images found in {image_dir}")
+
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(len(train_dataset), generator=generator).tolist()
+    n_val = int(len(perm) * val_frac)
+    val_indices, train_indices = perm[:n_val], perm[n_val:]
+
+    train_loader = DataLoader(dataset=Subset(train_dataset, train_indices),
+                              batch_size=batch_size,
+                              shuffle=True,
+                              num_workers=num_workers)
+    val_loader = None
+    if n_val > 0:
+        val_loader = DataLoader(dataset=Subset(val_dataset, val_indices),
+                                batch_size=batch_size,
+                                shuffle=False,
+                                num_workers=num_workers)
+    return train_loader, val_loader

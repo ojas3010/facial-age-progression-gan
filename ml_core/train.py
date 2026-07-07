@@ -15,7 +15,7 @@ _ML_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(_ML_CORE_DIR))
 
 from ml_core.model import Generator, Discriminator
-from ml_core.dataset import get_loader
+from ml_core.dataset import get_loaders
 
 def gradient_penalty(y, x, device):
     """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
@@ -79,9 +79,9 @@ class Solver(object):
         return max(iters)
         
     def train(self):
-        # Data loader
-        data_loader = get_loader(self.config['image_dir'], self.config['image_size'], self.config['batch_size'],
-                                 self.config.get('num_workers', 4))
+        # Data loaders: deterministic 80/20 train/val split
+        data_loader, val_loader = get_loaders(self.config['image_dir'], self.config['image_size'],
+                                              self.config['batch_size'], self.config.get('num_workers', 4))
         
         # Losses
         criterion_cls = nn.CrossEntropyLoss()
@@ -100,6 +100,19 @@ class Solver(object):
         # Fixed batch of real images for periodic sample-grid generation
         x_fixed, _ = next(iter(data_loader))
         x_fixed = x_fixed[:8].to(self.device)
+
+        # Fixed val batch with fixed target labels: comparable val losses
+        # across save steps (logging only, no early stopping)
+        x_val = None
+        if val_loader is not None:
+            x_val, label_val = next(iter(val_loader))
+            val_gen = torch.Generator().manual_seed(42)
+            label_val_trg = label_val[torch.randperm(label_val.size(0), generator=val_gen)]
+            c_val_org = label2onehot(label_val, self.config['c_dim']).to(self.device)
+            c_val_trg = label2onehot(label_val_trg, self.config['c_dim']).to(self.device)
+            x_val = x_val.to(self.device)
+            label_val = label_val.to(self.device)
+            label_val_trg = label_val_trg.to(self.device)
 
         for i in range(start_iters, self.config['num_iters']):
             try:
@@ -189,6 +202,20 @@ class Solver(object):
                 latest_path = os.path.join(self.config['model_save_dir'], 'latest-G.ckpt')
                 torch.save(self.G.state_dict(), latest_path)
                 print(f'Saved model checkpoints into {self.config["model_save_dir"]}...')
+
+                # Val losses on the fixed val batch (gradient penalty needs
+                # grads, so the D val loss omits the GP term)
+                if x_val is not None:
+                    with torch.no_grad():
+                        out_src_val, out_cls_val = self.D(x_val)
+                        x_val_fake = self.G(x_val, c_val_trg)
+                        out_src_vfake, out_cls_vfake = self.D(x_val_fake)
+                        d_val = (- torch.mean(out_src_val) + torch.mean(out_src_vfake)
+                                 + self.config['lambda_cls'] * criterion_cls(out_cls_val, label_val))
+                        g_val = (- torch.mean(out_src_vfake)
+                                 + self.config['lambda_rec'] * criterion_rec(self.G(x_val_fake, c_val_org), x_val)
+                                 + self.config['lambda_cls'] * criterion_cls(out_cls_vfake, label_val_trg))
+                    print(f"Val [iter {i+1}] D_loss [{d_val.item():.4f}], G_loss [{g_val.item():.4f}]")
 
                 # Sample grid: fixed real images translated to every target age group
                 with torch.no_grad():
