@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torchvision.utils import save_image
 
 # Ensure ml_core is accessible as a package regardless of cwd (matches
 # ml_core/inference.py and backend/main.py)
@@ -94,7 +95,11 @@ class Solver(object):
         start_time = time.time()
         
         data_iter = iter(data_loader)
-        
+
+        # Fixed batch of real images for periodic sample-grid generation
+        x_fixed, _ = next(iter(data_loader))
+        x_fixed = x_fixed[:8].to(self.device)
+
         for i in range(start_iters, self.config['num_iters']):
             try:
                 x_real, label_org = next(data_iter)
@@ -182,6 +187,18 @@ class Solver(object):
                 latest_path = os.path.join(self.config['model_save_dir'], 'latest-G.ckpt')
                 torch.save(self.G.state_dict(), latest_path)
                 print(f'Saved model checkpoints into {self.config["model_save_dir"]}...')
+
+                # Sample grid: fixed real images translated to every target age group
+                with torch.no_grad():
+                    x_concat = [x_fixed]
+                    for age in range(self.config['c_dim']):
+                        c_trg = label2onehot(torch.full((x_fixed.size(0),), age, dtype=torch.long), self.config['c_dim']).to(self.device)
+                        x_concat.append(self.G(x_fixed, c_trg))
+                    x_concat = torch.cat(x_concat, dim=3)
+                    x_concat = ((x_concat + 1) / 2).clamp(0, 1)  # denormalize
+                    sample_dir = os.path.join(os.path.dirname(self.config['model_save_dir']), 'samples')
+                    os.makedirs(sample_dir, exist_ok=True)
+                    save_image(x_concat, os.path.join(sample_dir, f'{i+1}.png'), nrow=1)
 
 
 if __name__ == '__main__':
