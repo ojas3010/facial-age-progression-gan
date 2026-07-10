@@ -20,6 +20,7 @@ function App() {
   const [error, setError] = useState("");
   const [elapsedMs, setElapsedMs] = useState(null);
   const [resultAge, setResultAge] = useState(null);
+  const [dragActive, setDragActive] = useState(false); // presentational-only: dropzone drag-hover styling
 
   const loadFile = (file) => {
     if (!file) return;
@@ -52,6 +53,16 @@ function App() {
 
   const handleDragOver = (e) => {
     e.preventDefault();
+  };
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setDragActive(false);
   };
 
   const handleProcess = async () => {
@@ -97,101 +108,202 @@ function App() {
     }
   };
 
+  const status = error ? "ERROR" : loading ? "WORKING" : "READY";
+  const statusClass = error ? "status-error" : loading ? "status-working" : "status-ready";
+
   return (
     <>
-      <h1>Aegis Ident</h1>
-      <div className="subtitle">AI-Powered Facial Age Progression for Missing Persons</div>
-      
-      <div className="dashboard">
-        {/* Left Panel: Input */}
-        <div className="panel">
-          <h2>Subject Input</h2>
-          
-          <div className="upload-area" onDrop={handleDrop} onDragOver={handleDragOver}>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleImageUpload}
-              disabled={loading}
-            />
-            {selectedImage ? (
-              <img src={selectedImage} alt="Subject" className="preview-image" />
-            ) : (
-              <div style={{color: '#9ca3af'}}>
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginBottom: '10px'}}>
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                  <polyline points="17 8 12 3 7 8"></polyline>
-                  <line x1="12" y1="3" x2="12" y2="15"></line>
-                </svg>
-                <p>Click or drag image to upload</p>
-              </div>
-            )}
-          </div>
+      <svg className="visually-hidden" aria-hidden="true" focusable="false">
+        <symbol id="icon-corner-brackets" viewBox="0 0 48 48">
+          <path d="M4 14V4h10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M44 14V4H34" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M4 34v10h10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M44 34v10H34" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </symbol>
+        <symbol id="icon-crosshair" viewBox="0 0 48 48">
+          <circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M24 2v10M24 36v10M2 24h10M36 24h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </symbol>
+      </svg>
 
-          <div className="controls">
-            <div className="slider-container">
-              <label>Target Age Group: {AGE_GROUPS[targetAge]}</label>
-              <input
-                type="range"
-                min="0"
-                max="5"
-                step="1"
-                value={targetAge}
-                onChange={(e) => setTargetAge(parseInt(e.target.value))}
-                disabled={loading}
-              />
-              <div className="age-labels">
-                <span>Infant</span>
-                <span>Adult</span>
-                <span>Senior</span>
+      <a href="#console" className="skip-link">Skip to content</a>
+
+      <main className="console" id="console">
+        <header className="masthead">
+          <div className="masthead-id">
+            <h1 className="wordmark">Aegis Ident</h1>
+            <p className="classification">Age progression for missing-persons casework</p>
+          </div>
+          <dl className="meta-row">
+            <div className="meta-item">
+              <dt>Model</dt>
+              <dd>SAM-GAN</dd>
+            </div>
+            <div className="meta-item">
+              <dt>Status</dt>
+              <dd className={statusClass}>{status}</dd>
+            </div>
+          </dl>
+        </header>
+
+        <section className="grid">
+          {/* Bay 01: Intake */}
+          <article className="bay bay--intake">
+            <div className="bay-head">
+              <span className="panel-index" aria-hidden="true">01</span>
+              <h2 className="panel-title">Subject &middot; Intake</h2>
+            </div>
+
+            <div className="field-group">
+              <div
+                className={`dropzone${dragActive ? " dropzone--active" : ""}`}
+                onDrop={(e) => { setDragActive(false); handleDrop(e); }}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+              >
+                <input
+                  type="file"
+                  id="subject-file"
+                  className="dropzone-input"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  disabled={loading}
+                />
+                <label htmlFor="subject-file" className="dropzone-surface">
+                  {selectedImage ? (
+                    <img
+                      src={selectedImage}
+                      alt="Uploaded subject photograph"
+                      className="preview"
+                      width="600"
+                      height="400"
+                    />
+                  ) : (
+                    <>
+                      <svg className="icon dropzone-icon" aria-hidden="true">
+                        <use href="#icon-corner-brackets" />
+                      </svg>
+                      <p className="dropzone-text">Drop subject image &middot; or click to browse</p>
+                      <p className="dropzone-caption">JPG &middot; PNG &middot; WEBP</p>
+                    </>
+                  )}
+                </label>
               </div>
             </div>
-            
-            <button 
-              onClick={handleProcess} 
+
+            <div className="field-group">
+              <span className="value">
+                Target &middot; {AGE_GROUPS[targetAge].replace(" years", "").replace(" - ", "–")} yr
+              </span>
+              <fieldset className="age-segments" disabled={loading}>
+                <legend className="visually-hidden">Target age group</legend>
+                {AGE_GROUPS.map((group, i) => {
+                  const short = group.replace(" years", "").replace(" - ", "–");
+                  return (
+                    <label
+                      key={group}
+                      className={`segment${targetAge === i ? " segment--selected" : ""}`}
+                    >
+                      <input
+                        type="radio"
+                        className="segment-input"
+                        name="target-age-group"
+                        value={i}
+                        checked={targetAge === i}
+                        onChange={() => setTargetAge(i)}
+                      />
+                      <span className="segment-text">{short}</span>
+                    </label>
+                  );
+                })}
+              </fieldset>
+            </div>
+
+            <button
+              type="button"
+              className="btn"
+              onClick={handleProcess}
               disabled={!selectedImage || loading}
             >
-              {loading ? "Processing..." : "Generate Progression"}
-            </button>
-            {error && <p style={{color: '#ef4444', marginTop: '10px', fontSize: '0.9rem'}}>{error}</p>}
-          </div>
-        </div>
-
-        {/* Right Panel: Output */}
-        <div className="panel">
-          <h2>Prediction Result</h2>
-          
-          {loading ? (
-            <div className="result-placeholder">
-              <div className="loader"></div>
-              <p>Analyzing facial structures...</p>
-              <p style={{fontSize: '0.8rem', color: '#6b7280'}}>Applying GAN transformations</p>
-            </div>
-          ) : resultImage ? (
-            <>
-              <img src={resultImage} alt="Result" className="preview-image" />
-              <div className="result-actions">
-                {elapsedMs !== null && (
-                  <span className="latency-badge">
-                    Synthesized in {(elapsedMs / 1000).toFixed(2)}s — {AGE_GROUPS[resultAge]}
+              {loading ? (
+                <>
+                  Processing&hellip;
+                  <span className="btn-tick" aria-hidden="true">
+                    <span></span><span></span><span></span>
                   </span>
-                )}
-                <a href={resultImage} download="age_progression.jpg" className="download-link">
-                  Download Result
-                </a>
+                </>
+              ) : (
+                "Run progression"
+              )}
+            </button>
+
+            {error && (
+              <div className="error" role="alert" aria-live="assertive">
+                <span className="label">Error</span>
+                <p>{error}</p>
               </div>
-            </>
-          ) : (
-            <div className="result-placeholder">
-              <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" style={{opacity: 0.3}}>
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-                <circle cx="12" cy="7" r="4"></circle>
-              </svg>
-              <p>Result will appear here</p>
+            )}
+          </article>
+
+          {/* Bay 02: Synthesis */}
+          <article className="bay bay--synth">
+            <div className="bay-head">
+              <span className="panel-index" aria-hidden="true">02</span>
+              <h2 className="panel-title">Progression &middot; Synthesis</h2>
             </div>
-          )}
-        </div>
-      </div>
+
+            <div className="synth-region" aria-live="polite" aria-busy={loading}>
+              {loading ? (
+                <div className="state state--loading">
+                  <span className="label">Synthesizing &middot; GAN inference</span>
+                  <div className="telemetry-bar" aria-hidden="true">
+                    <div className="telemetry-bar-fill"></div>
+                  </div>
+                </div>
+              ) : resultImage ? (
+                <div className="state state--result">
+                  <img
+                    src={resultImage}
+                    alt={`Age-progressed result, ${AGE_GROUPS[resultAge]}`}
+                    className="result"
+                    width="600"
+                    height="400"
+                  />
+                  {elapsedMs !== null && (
+                    <dl className="readout">
+                      <div className="readout-row">
+                        <dt>Synthesized</dt>
+                        <dd>
+                          <span className="readout-figure">{(elapsedMs / 1000).toFixed(2)}S</span>
+                          {" · "}
+                          {AGE_GROUPS[resultAge]}
+                        </dd>
+                      </div>
+                    </dl>
+                  )}
+                  <a href={resultImage} download="age_progression.jpg" className="download">
+                    Download <span aria-hidden="true">&darr;</span>
+                  </a>
+                </div>
+              ) : (
+                <div className="state state--empty">
+                  <svg className="icon icon-lg state-icon" aria-hidden="true">
+                    <use href="#icon-crosshair" />
+                  </svg>
+                  <span className="label">Awaiting synthesis</span>
+                  <p className="helper">Select a subject and target age, then run.</p>
+                </div>
+              )}
+            </div>
+          </article>
+        </section>
+
+        <footer className="baseline">
+          <p>Images processed in-session &middot; not stored</p>
+          <p>Academic showcase build &middot; not for operational deployment</p>
+        </footer>
+      </main>
     </>
   )
 }
