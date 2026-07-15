@@ -1,6 +1,6 @@
 # GAN-Based Facial Age Progression and Regression
 
-[![CI](https://github.com/ojas3010/Major-project/actions/workflows/ci.yml/badge.svg)](https://github.com/ojas3010/Major-project/actions/workflows/ci.yml)
+[![CI](https://github.com/ojas3010/facial-age-progression-gan/actions/workflows/ci.yml/badge.svg)](https://github.com/ojas3010/facial-age-progression-gan/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12%2B-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c)
 ![React](https://img.shields.io/badge/React-19-61dafb)
