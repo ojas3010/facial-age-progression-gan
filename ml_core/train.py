@@ -252,5 +252,12 @@ if __name__ == '__main__':
         'model_save_dir': os.path.join(_ML_CORE_DIR, 'models')
     }
     os.makedirs(config['model_save_dir'], exist_ok=True)
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            "CUDA not available - refusing to train on CPU.\n"
+            "The default PyPI torch wheel is CPU-only on Windows. Install the CUDA build:\n"
+            "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+        )
+
     solver = Solver(config)
     solver.train()
