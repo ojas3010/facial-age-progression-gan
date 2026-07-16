@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision.utils import save_image
+import argparse
+import random
 
 # Ensure ml_core is accessible as a package regardless of cwd (matches
 # ml_core/inference.py and backend/main.py)
@@ -41,19 +43,19 @@ class Solver(object):
     def __init__(self, config):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         self.build_model()
-        
+
     def build_model(self):
         self.G = Generator(c_dim=self.config['c_dim'], repeat_num=self.config['g_repeat_num'])
         self.D = Discriminator(image_size=self.config['image_size'], c_dim=self.config['c_dim'], repeat_num=self.config['d_repeat_num'])
-        
+
         self.g_optimizer = optim.Adam(self.G.parameters(), self.config['g_lr'], [self.config['beta1'], self.config['beta2']])
         self.d_optimizer = optim.Adam(self.D.parameters(), self.config['d_lr'], [self.config['beta1'], self.config['beta2']])
-        
+
         self.G.to(self.device)
         self.D.to(self.device)
-        
+
     def restore_model(self, resume_iters):
         print(f'Loading the trained models from step {resume_iters}...')
         G_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-G.ckpt')
@@ -67,7 +69,7 @@ class Solver(object):
             opt_state = torch.load(opt_path, map_location=self.device)
             self.g_optimizer.load_state_dict(opt_state['g_optimizer'])
             self.d_optimizer.load_state_dict(opt_state['d_optimizer'])
-        
+
     def get_latest_checkpoint(self):
         models_dir = self.config['model_save_dir']
         if not os.path.exists(models_dir):
@@ -77,23 +79,23 @@ class Solver(object):
             return 0
         iters = [int(f.split('-')[0]) for f in checkpoints]
         return max(iters)
-        
+
     def train(self):
         # Data loaders: deterministic 80/20 train/val split
         data_loader, val_loader = get_loaders(self.config['image_dir'], self.config['image_size'],
                                               self.config['batch_size'], self.config.get('num_workers', 4))
-        
+
         # Losses
         criterion_cls = nn.CrossEntropyLoss()
         criterion_rec = nn.L1Loss()
-        
+
         start_iters = self.get_latest_checkpoint()
         if start_iters > 0:
             self.restore_model(start_iters)
-        
+
         print(f"Starting training from iteration {start_iters}...")
         start_time = time.time()
-        
+
         data_iter = iter(data_loader)
         g_loss = None  # unset until the first n_critic-th generator step
 
@@ -149,6 +151,13 @@ class Solver(object):
             out_src, out_cls = self.D(x_fake.detach())
             d_loss_fake = torch.mean(out_src)
 
+            # NOTE: no AMP / GradScaler / torch.compile in this loop, ever. The
+            # gradient penalty below is a double-backward - autograd.grad with
+            # create_graph=True, then backward through that gradient. GradScaler
+            # scales the loss, so the inner gradient norm would be computed on
+            # scaled values and never unscaled; the penalty (||g||-1)^2 comes out
+            # wrong by the scale factor. Nothing crashes, nothing warns; the run
+            # just trains wrong. This rule is not stale. Do not "optimize" this.
             # Compute loss for gradient penalty.
             alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
             x_hat = (alpha * x_real.data + (1 - alpha) * x_fake.data).requires_grad_(True)
@@ -164,7 +173,7 @@ class Solver(object):
             # =================================================================================== #
             #                               3. Train the generator                                #
             # =================================================================================== #
-            
+
             if (i+1) % self.config['n_critic'] == 0:
                 # Original-to-target domain.
                 x_fake = self.G(x_real, c_trg)
@@ -203,6 +212,24 @@ class Solver(object):
                 torch.save(self.G.state_dict(), latest_path)
                 print(f'Saved model checkpoints into {self.config["model_save_dir"]}...')
 
+                # D/opt checkpoints exist only to resume training; G checkpoints
+                # feed evaluation curves and are kept forever. get_latest_checkpoint()
+                # discovers the resume point via -G.ckpt, so pruning D/opt here
+                # cannot break checkpoint discovery. This runs after the save
+                # above so an interrupted save never leaves zero resume state.
+                keep_last = self.config.get('keep_last')
+                if keep_last:
+                    opt_iters = sorted(
+                        int(f.split('-')[0])
+                        for f in os.listdir(self.config['model_save_dir'])
+                        if f.endswith('-opt.ckpt')
+                    )
+                    for old_iter in opt_iters[:-keep_last]:
+                        for suffix in ('-D.ckpt', '-opt.ckpt'):
+                            old_path = os.path.join(self.config['model_save_dir'], f'{old_iter}{suffix}')
+                            if os.path.exists(old_path):
+                                os.remove(old_path)
+
                 # Val losses on the fixed val batch (gradient penalty needs
                 # grads, so the D val loss omits the GP term)
                 if x_val is not None:
@@ -231,33 +258,73 @@ class Solver(object):
 
 
 if __name__ == '__main__':
-    config = {
-        'c_dim': 6, # 6 age groups
+    parser = argparse.ArgumentParser(
+        description='WGAN-GP training for StarGAN facial age progression')
+
+    # Training
+    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--num-iters', type=int, default=100000)
+    parser.add_argument('--n-critic', type=int, default=5)
+    parser.add_argument('--g-lr', type=float, default=0.0001)
+    parser.add_argument('--d-lr', type=float, default=0.0001)
+    parser.add_argument('--beta1', type=float, default=0.5)
+    parser.add_argument('--beta2', type=float, default=0.999)
+    parser.add_argument('--lambda-cls', type=float, default=1)
+    parser.add_argument('--lambda-rec', type=float, default=10)
+    parser.add_argument('--lambda-gp', type=float, default=10)
+
+    # IO / logging
+    parser.add_argument('--image-dir', type=str,
+                        default=os.path.join(_ML_CORE_DIR, 'data/utkface'))
+    parser.add_argument('--model-save-dir', type=str,
+                        default=os.path.join(_ML_CORE_DIR, 'models'))
+    parser.add_argument('--log-step', type=int, default=10)
+    parser.add_argument('--model-save-step', type=int, default=1000)
+    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--keep-last', type=int, default=3,
+                        help='D/opt checkpoint pairs kept for resume; G checkpoints are never pruned')
+
+    args = parser.parse_args()
+    config = vars(args)
+
+    # Seeds weight init, shuffle order, and augmentation draws. Deliberately
+    # does NOT touch the train/val split seed (dataset.py, pinned 42) or the
+    # fixed val-batch generator (train.py, pinned 42) - the val set must stay
+    # identical across runs regardless of --seed, or val losses stop being
+    # comparable across experiments.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
+    # Architecture is deliberately not exposed as flags: a checkpoint trained
+    # with a different c_dim / image_size / repeat_num will not load in
+    # inference.py, and c_dim is welded to the 6 age domains in dataset.py.
+    config.update({
+        'c_dim': 6,
         'image_size': 128,
         'g_repeat_num': 6,
         'd_repeat_num': 6,
-        'g_lr': 0.0001,
-        'd_lr': 0.0001,
-        'beta1': 0.5,
-        'beta2': 0.999,
-        'image_dir': os.path.join(_ML_CORE_DIR, 'data/utkface'),
-        'batch_size': 8,
-        'num_iters': 100000,
-        'n_critic': 5,
-        'lambda_cls': 1,
-        'lambda_rec': 10,
-        'lambda_gp': 10,
-        'log_step': 10,
-        'model_save_step': 1000,
-        'model_save_dir': os.path.join(_ML_CORE_DIR, 'models')
-    }
-    os.makedirs(config['model_save_dir'], exist_ok=True)
+    })
+
     if not torch.cuda.is_available():
         raise SystemExit(
             "CUDA not available - refusing to train on CPU.\n"
             "The default PyPI torch wheel is CPU-only on Windows. Install the CUDA build:\n"
             "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130"
         )
+
+    # Input shape is fixed every iteration (128x128, constant batch size), which
+    # is exactly the case cudnn.benchmark exists for: it lets cuDNN profile and
+    # pick the fastest conv algorithm for that one shape instead of the default
+    # heuristic. Trade-off: algorithm selection becomes non-deterministic, so
+    # runs stay seed-reproducible in init/data order but are NOT bit-exact.
+    # Not measured on this machine (no CUDA available here) - this is standard
+    # practice for fixed-shape training, not a claimed speedup.
+    torch.backends.cudnn.benchmark = True
+
+    os.makedirs(config['model_save_dir'], exist_ok=True)
 
     solver = Solver(config)
     solver.train()
