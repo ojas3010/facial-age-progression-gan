@@ -25,4 +25,3 @@ Thumbs.db
 # OS generated files (WSL/Windows ADS)
 *Zone.Identifier
 samples/
-*.ckpt
