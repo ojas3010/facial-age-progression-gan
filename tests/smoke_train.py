@@ -55,5 +55,20 @@ solver.train()
 assert os.path.exists(os.path.join(model_dir, '10-G.ckpt'))
 print(f"After resume: {sorted(os.listdir(model_dir))}")
 
+print("=== Phase 3: keep-last pruning, run to 15 ===")
+config['num_iters'] = 15
+config['keep_last'] = 1
+solver = Solver(config)
+solver.train()
+
+for f in ['5-G.ckpt', '10-G.ckpt', '15-G.ckpt']:
+    assert os.path.exists(os.path.join(model_dir, f)), f"G checkpoint pruned: {f}"
+for f in ['15-D.ckpt', '15-opt.ckpt']:
+    assert os.path.exists(os.path.join(model_dir, f)), f"newest D/opt pair missing: {f}"
+for f in ['5-D.ckpt', '5-opt.ckpt', '10-D.ckpt', '10-opt.ckpt']:
+    assert not os.path.exists(os.path.join(model_dir, f)), f"old D/opt pair not pruned: {f}"
+assert solver.get_latest_checkpoint() == 15, "checkpoint discovery broken by pruning"
+print(f"After pruning: {sorted(os.listdir(model_dir))}")
+
 shutil.rmtree(work)
 print("SMOKE TRAIN OK")
