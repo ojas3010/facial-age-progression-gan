@@ -29,16 +29,13 @@ class UTKFaceDataset(Dataset):
             # Sorted so the file order (and any index-based split) is
             # reproducible across runs and platforms
             for filename in sorted(os.listdir(image_dir)):
-                if filename.endswith('.jpg') or filename.endswith('.png'):
-                    parts = filename.split('_')
-                    if len(parts) >= 1:
-                        try:
-                            age = int(parts[0])
-                            age_group = get_age_group(age)
-                            self.image_paths.append(os.path.join(image_dir, filename))
-                            self.labels.append(age_group)
-                        except ValueError:
-                            continue
+                if filename.endswith(('.jpg', '.png')):
+                    try:
+                        age = int(filename.split('_')[0])
+                    except ValueError:
+                        continue
+                    self.image_paths.append(os.path.join(image_dir, filename))
+                    self.labels.append(get_age_group(age))
 
     def __len__(self):
         return len(self.image_paths)
@@ -54,26 +51,6 @@ class UTKFaceDataset(Dataset):
         # Convert label to one-hot encoding representation not needed here if using CrossEntropyLoss
         # But StarGAN typically uses one-hot encoded domain labels for the generator
         return image, label
-
-def get_loader(image_dir, image_size=128, batch_size=16, num_workers=4):
-    """Builds and returns Dataloader."""
-    transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-
-    dataset = UTKFaceDataset(image_dir, transform)
-    
-    if len(dataset) == 0:
-        print(f"Warning: No valid images found in {image_dir}")
-
-    data_loader = DataLoader(dataset=dataset,
-                             batch_size=batch_size,
-                             shuffle=True,
-                             num_workers=num_workers)
-    return data_loader
 
 def get_loaders(image_dir, image_size=128, batch_size=16, num_workers=4, val_frac=0.2, seed=42):
     """Builds train/val DataLoaders with a deterministic 80/20 split.
@@ -103,8 +80,13 @@ def get_loaders(image_dir, image_size=128, batch_size=16, num_workers=4, val_fra
     val_dataset = copy.copy(train_dataset)
     val_dataset.transform = val_transform
 
+    # Fail here with the cause; an empty dataset otherwise surfaces as an
+    # opaque "num_samples=0" error from the DataLoader sampler
     if len(train_dataset) == 0:
-        print(f"Warning: No valid images found in {image_dir}")
+        raise ValueError(
+            f"No valid images found in {image_dir}. Expected UTKFace files "
+            f"named [age]_[gender]_[race]_[date].jpg - see README, 'Getting the dataset'."
+        )
 
     generator = torch.Generator().manual_seed(seed)
     perm = torch.randperm(len(train_dataset), generator=generator).tolist()

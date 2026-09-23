@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import datetime
 import time
@@ -16,8 +17,10 @@ import random
 _ML_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(_ML_CORE_DIR))
 
-from ml_core.model import Generator, Discriminator
+from ml_core.model import Generator, Discriminator, generator_state_dict, label2onehot
 from ml_core.dataset import get_loaders
+
+_CKPT_RE = re.compile(r'^(\d+)-(G|D|opt)\.ckpt$')
 
 def gradient_penalty(y, x, device):
     """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
@@ -32,12 +35,56 @@ def gradient_penalty(y, x, device):
     dydx_l2norm = torch.sqrt(torch.sum(dydx**2, dim=1))
     return torch.mean((dydx_l2norm - 1)**2)
 
-def label2onehot(labels, dim):
-    """Convert label indices to one-hot vectors."""
-    batch_size = labels.size(0)
-    out = torch.zeros(batch_size, dim)
-    out[np.arange(batch_size), labels.long()] = 1
-    return out
+def save_checkpoint(obj, path):
+    """torch.save to a temp file, then rename into place.
+
+    The rename is atomic, so `path` is either absent or complete. A run killed
+    mid-save - routine on preemptible Colab/Kaggle - would otherwise leave a
+    truncated checkpoint that crashes the next resume.
+    """
+    tmp_path = path + '.tmp'
+    torch.save(obj, tmp_path)
+    for attempt in range(5):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(1)
+
+def checkpoint_iters(model_dir, kind):
+    """Iterations with an {iter}-{kind}.ckpt file; kind is 'G', 'D' or 'opt'.
+
+    Anything else in the directory (latest-G.ckpt, a hand-copied best-G.ckpt,
+    .tmp leftovers) is ignored rather than crashing int().
+    """
+    if not os.path.isdir(model_dir):
+        return set()
+    matches = (_CKPT_RE.match(f) for f in os.listdir(model_dir))
+    return {int(m.group(1)) for m in matches if m and m.group(2) == kind}
+
+def resume_points(model_dir):
+    """Sorted iterations restore_model can load: both G and D present."""
+    return sorted(checkpoint_iters(model_dir, 'G') & checkpoint_iters(model_dir, 'D'))
+
+def find_resume_iter(model_dir):
+    """Newest resume point, or 0 for a fresh run."""
+    points = resume_points(model_dir)
+    return points[-1] if points else 0
+
+def prune_resume_checkpoints(model_dir, keep_last):
+    """Delete D/opt checkpoints of all but the newest `keep_last` resume points.
+
+    D/opt exist only to resume training; G checkpoints feed evaluation curves
+    and are never touched. Only complete resume points are counted, so an
+    orphan D/opt left by a killed save can't push a real one out of the window.
+    """
+    for old_iter in resume_points(model_dir)[:-keep_last]:
+        for suffix in ('-D.ckpt', '-opt.ckpt'):
+            old_path = os.path.join(model_dir, f'{old_iter}{suffix}')
+            if os.path.exists(old_path):
+                os.remove(old_path)
 
 class Solver(object):
     def __init__(self, config):
@@ -60,25 +107,23 @@ class Solver(object):
         print(f'Loading the trained models from step {resume_iters}...')
         G_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-G.ckpt')
         D_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-D.ckpt')
-        self.G.load_state_dict(torch.load(G_path, map_location=self.device))
-        self.D.load_state_dict(torch.load(D_path, map_location=self.device))
+        # generator_state_dict: G checkpoints from before the InstanceNorm
+        # change carry running-stat buffers that must be dropped to load
+        self.G.load_state_dict(generator_state_dict(
+            torch.load(G_path, map_location=self.device, weights_only=True)))
+        self.D.load_state_dict(torch.load(D_path, map_location=self.device, weights_only=True))
 
         # Restore optimizer states so training resumes with intact Adam momentum
         opt_path = os.path.join(self.config['model_save_dir'], f'{resume_iters}-opt.ckpt')
         if os.path.exists(opt_path):
-            opt_state = torch.load(opt_path, map_location=self.device)
+            opt_state = torch.load(opt_path, map_location=self.device, weights_only=True)
             self.g_optimizer.load_state_dict(opt_state['g_optimizer'])
             self.d_optimizer.load_state_dict(opt_state['d_optimizer'])
+        else:
+            print(f'No optimizer state at {opt_path}; Adam moments restart from zero.')
 
     def get_latest_checkpoint(self):
-        models_dir = self.config['model_save_dir']
-        if not os.path.exists(models_dir):
-            return 0
-        checkpoints = [f for f in os.listdir(models_dir) if f.endswith('-G.ckpt') and f != 'latest-G.ckpt']
-        if not checkpoints:
-            return 0
-        iters = [int(f.split('-')[0]) for f in checkpoints]
-        return max(iters)
+        return find_resume_iter(self.config['model_save_dir'])
 
     def train(self):
         # Data loaders: deterministic 80/20 train/val split
@@ -120,12 +165,10 @@ class Solver(object):
             try:
                 x_real, label_org = next(data_iter)
             except StopIteration:
+                # get_loaders() raises on an empty dataset, so a fresh
+                # iterator always yields at least one batch
                 data_iter = iter(data_loader)
-                try:
-                    x_real, label_org = next(data_iter)
-                except StopIteration:
-                    print("Dataset is empty. Cannot train.")
-                    return
+                x_real, label_org = next(data_iter)
 
             # Generate target domain labels randomly
             rand_idx = torch.randperm(label_org.size(0))
@@ -200,35 +243,24 @@ class Solver(object):
 
             # Save model checkpoints.
             if (i+1) % self.config['model_save_step'] == 0:
-                G_path = os.path.join(self.config['model_save_dir'], f'{i+1}-G.ckpt')
-                D_path = os.path.join(self.config['model_save_dir'], f'{i+1}-D.ckpt')
-                opt_path = os.path.join(self.config['model_save_dir'], f'{i+1}-opt.ckpt')
-                torch.save(self.G.state_dict(), G_path)
-                torch.save(self.D.state_dict(), D_path)
-                torch.save({'g_optimizer': self.g_optimizer.state_dict(),
-                            'd_optimizer': self.d_optimizer.state_dict()}, opt_path)
+                model_dir = self.config['model_save_dir']
+                # opt, then D, then G: the resume point is keyed on G+D, so an
+                # iteration only becomes resumable once its G - written last -
+                # lands, and by then its D and optimizer state are complete.
+                save_checkpoint({'g_optimizer': self.g_optimizer.state_dict(),
+                                 'd_optimizer': self.d_optimizer.state_dict()},
+                                os.path.join(model_dir, f'{i+1}-opt.ckpt'))
+                save_checkpoint(self.D.state_dict(), os.path.join(model_dir, f'{i+1}-D.ckpt'))
+                save_checkpoint(self.G.state_dict(), os.path.join(model_dir, f'{i+1}-G.ckpt'))
                 # Keep a stable alias for the inference backend, which loads latest-G.ckpt
-                latest_path = os.path.join(self.config['model_save_dir'], 'latest-G.ckpt')
-                torch.save(self.G.state_dict(), latest_path)
-                print(f'Saved model checkpoints into {self.config["model_save_dir"]}...')
+                save_checkpoint(self.G.state_dict(), os.path.join(model_dir, 'latest-G.ckpt'))
+                print(f'Saved model checkpoints into {model_dir}...')
 
-                # D/opt checkpoints exist only to resume training; G checkpoints
-                # feed evaluation curves and are kept forever. get_latest_checkpoint()
-                # discovers the resume point via -G.ckpt, so pruning D/opt here
-                # cannot break checkpoint discovery. This runs after the save
-                # above so an interrupted save never leaves zero resume state.
+                # Runs after the save above so an interrupted save never
+                # leaves zero resume state. 0/None keeps everything.
                 keep_last = self.config.get('keep_last')
                 if keep_last:
-                    opt_iters = sorted(
-                        int(f.split('-')[0])
-                        for f in os.listdir(self.config['model_save_dir'])
-                        if f.endswith('-opt.ckpt')
-                    )
-                    for old_iter in opt_iters[:-keep_last]:
-                        for suffix in ('-D.ckpt', '-opt.ckpt'):
-                            old_path = os.path.join(self.config['model_save_dir'], f'{old_iter}{suffix}')
-                            if os.path.exists(old_path):
-                                os.remove(old_path)
+                    prune_resume_checkpoints(model_dir, keep_last)
 
                 # Val losses on the fixed val batch (gradient penalty needs
                 # grads, so the D val loss omits the GP term)
@@ -252,7 +284,8 @@ class Solver(object):
                         x_concat.append(self.G(x_fixed, c_trg))
                     x_concat = torch.cat(x_concat, dim=3)
                     x_concat = ((x_concat + 1) / 2).clamp(0, 1)  # denormalize
-                    sample_dir = os.path.join(os.path.dirname(self.config['model_save_dir']), 'samples')
+                    # normpath: a trailing slash would put samples/ inside models/
+                    sample_dir = os.path.join(os.path.dirname(os.path.normpath(self.config['model_save_dir'])), 'samples')
                     os.makedirs(sample_dir, exist_ok=True)
                     save_image(x_concat, os.path.join(sample_dir, f'{i+1}.png'), nrow=1)
 
@@ -283,9 +316,12 @@ if __name__ == '__main__':
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--keep-last', type=int, default=3,
-                        help='D/opt checkpoint pairs kept for resume; G checkpoints are never pruned')
+                        help='D/opt checkpoint pairs kept for resume (0 keeps all); '
+                             'G checkpoints are never pruned')
 
     args = parser.parse_args()
+    if args.keep_last < 0:
+        parser.error('--keep-last must be >= 0')
     config = vars(args)
 
     # Seeds weight init, shuffle order, and augmentation draws. Deliberately

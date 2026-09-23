@@ -1,6 +1,7 @@
 """Manual smoke test for the training loop (not run by pytest: name lacks
 test_ prefix). Runs a few CPU iterations on synthetic data and verifies
-checkpointing, the latest-G.ckpt alias, and optimizer-state resume.
+checkpointing, the latest-G.ckpt alias, optimizer-state resume, D/opt
+pruning, and resume after a save that was killed mid-write.
 
 Usage: .venv/bin/python tests/smoke_train.py
 """
@@ -69,6 +70,17 @@ for f in ['5-D.ckpt', '5-opt.ckpt', '10-D.ckpt', '10-opt.ckpt']:
     assert not os.path.exists(os.path.join(model_dir, f)), f"old D/opt pair not pruned: {f}"
 assert solver.get_latest_checkpoint() == 15, "checkpoint discovery broken by pruning"
 print(f"After pruning: {sorted(os.listdir(model_dir))}")
+
+print("=== Phase 4: save killed mid-write at 20, resume falls back to 15 ===")
+# Saves go opt -> D -> G, each via a .tmp rename: a kill during the G write
+# leaves 20-opt and 20-D complete but no 20-G.ckpt
+shutil.copy(os.path.join(model_dir, '15-opt.ckpt'), os.path.join(model_dir, '20-opt.ckpt'))
+shutil.copy(os.path.join(model_dir, '15-D.ckpt'), os.path.join(model_dir, '20-D.ckpt'))
+with open(os.path.join(model_dir, '20-G.ckpt.tmp'), 'wb') as f:
+    f.write(b'partial write')
+solver = Solver(config)
+assert solver.get_latest_checkpoint() == 15, "incomplete save must not become the resume point"
+solver.restore_model(15)
 
 shutil.rmtree(work)
 print("SMOKE TRAIN OK")

@@ -15,6 +15,7 @@ venv/
 ml_core/data/
 models/
 *.ckpt
+*.ckpt.tmp
 *.pt
 *.pth
 

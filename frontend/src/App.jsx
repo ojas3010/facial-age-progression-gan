@@ -1,6 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+
+// Mirrors backend/main.py: checked here for instant feedback, enforced there
+const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 const AGE_GROUPS = [
   "0 - 10 years",
@@ -8,8 +12,37 @@ const AGE_GROUPS = [
   "21 - 30 years",
   "31 - 40 years",
   "41 - 50 years",
-  "50+ years"
+  "51+ years"
 ];
+
+// Which weights the server is running, reported by GET /
+const BACKEND_STATES = {
+  checking: { label: "CHECKING", className: "status-working" },
+  loaded: { label: "LOADED" },
+  untrained: {
+    label: "UNTRAINED",
+    className: "status-error",
+    notice: "The server has no trained checkpoint loaded. Output will be noise.",
+  },
+  offline: {
+    label: "OFFLINE",
+    className: "status-error",
+    notice: `Backend unreachable at ${API_URL}.`,
+  },
+};
+
+// Resolves to a BACKEND_STATES key; rejects only when aborted
+async function fetchBackendState(signal) {
+  try {
+    const response = await fetch(`${API_URL}/`, { signal });
+    if (!response.ok) return "offline";
+    const data = await response.json();
+    return data.model_loaded ? "loaded" : "untrained";
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    return "offline";
+  }
+}
 
 function App() {
   const [selectedImage, setSelectedImage] = useState(null);
@@ -21,11 +54,22 @@ function App() {
   const [elapsedMs, setElapsedMs] = useState(null);
   const [resultAge, setResultAge] = useState(null);
   const [dragActive, setDragActive] = useState(false); // presentational-only: dropzone drag-hover styling
+  const [backend, setBackend] = useState("checking");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchBackendState(controller.signal).then(setBackend, () => {});
+    return () => controller.abort();
+  }, []);
 
   const loadFile = (file) => {
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setError("Please upload an image file (JPEG, PNG or WEBP).");
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      setError("Please upload a JPEG, PNG or WEBP image.");
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError("Image exceeds the 5 MB upload limit.");
       return;
     }
     setImageFile(file);
@@ -62,6 +106,9 @@ function App() {
 
   const handleDragLeave = (e) => {
     e.preventDefault();
+    // dragleave also fires when the pointer crosses onto a child (the file
+    // input covers the whole zone), which would cancel the highlight at once
+    if (e.currentTarget.contains(e.relatedTarget)) return;
     setDragActive(false);
   };
 
@@ -105,11 +152,14 @@ function App() {
       setError(err.message || "Could not connect to the processing server.");
     } finally {
       setLoading(false);
+      // A request is a fresh probe: pick up a backend that started or died
+      fetchBackendState().then(setBackend);
     }
   };
 
   const status = error ? "ERROR" : loading ? "WORKING" : "READY";
   const statusClass = error ? "status-error" : loading ? "status-working" : "status-ready";
+  const backendState = BACKEND_STATES[backend];
 
   return (
     <>
@@ -140,6 +190,10 @@ function App() {
               <dd>SAM-GAN</dd>
             </div>
             <div className="meta-item">
+              <dt>Weights</dt>
+              <dd className={backendState.className}>{backendState.label}</dd>
+            </div>
+            <div className="meta-item">
               <dt>Status</dt>
               <dd className={statusClass}>{status}</dd>
             </div>
@@ -166,7 +220,7 @@ function App() {
                   type="file"
                   id="subject-file"
                   className="dropzone-input"
-                  accept="image/*"
+                  accept={ACCEPTED_TYPES.join(",")}
                   onChange={handleImageUpload}
                   disabled={loading}
                 />
@@ -185,7 +239,7 @@ function App() {
                         <use href="#icon-corner-brackets" />
                       </svg>
                       <p className="dropzone-text">Drop subject image &middot; or click to browse</p>
-                      <p className="dropzone-caption">JPG &middot; PNG &middot; WEBP</p>
+                      <p className="dropzone-caption">JPG &middot; PNG &middot; WEBP &middot; max 5 MB</p>
                     </>
                   )}
                 </label>
@@ -292,7 +346,9 @@ function App() {
                     <use href="#icon-crosshair" />
                   </svg>
                   <span className="label">Awaiting synthesis</span>
-                  <p className="helper">Select a subject and target age, then run.</p>
+                  <p className="helper">
+                    {backendState.notice ?? "Select a subject and target age, then run."}
+                  </p>
                 </div>
               )}
             </div>
