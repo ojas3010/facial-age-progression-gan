@@ -19,6 +19,10 @@ models/
 *.pt
 *.pth
 
+# Evaluation images (scripts/evaluate.py, ~750 MB per checkpoint); the
+# metrics and per-image CSVs next to them are committed
+results/eval/**/*.png
+
 # OS generated files
 .DS_Store
 Thumbs.db
