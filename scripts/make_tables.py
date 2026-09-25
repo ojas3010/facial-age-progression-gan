@@ -1,16 +1,26 @@
 """LaTeX tables for the paper: training setup, dataset split, per-age-group results,
 and results by gender and race.
 
-Usage: python scripts/make_tables.py [eval_dir] [out.tex] [image_dir]
+Usage: python scripts/make_tables.py [eval_dir] [out.tex] [image_dir] [log_path]
+           [--seed N] [--lambda-rec X] [--lambda-cls X] [--lambda-gp X]
+
+The setup table shows train.py's defaults. A run launched with different
+values for these flags must pass the same values here; they replace the
+defaults in the table and are named in its caption.
 
 Needs, in eval_dir: metrics.csv (scripts/evaluate.py), ages_mivolo.csv
 (scripts/age_mivolo.py) and arcface_pairs.csv (scripts/arcface_pairs.py).
-Pass the same image_dir that evaluate.py used. Writes results/tables_<ckpt>.tex
-by default. The tables use booktabs: \\usepackage{booktabs}.
+Pass the same image_dir that evaluate.py used. The setup table takes the
+iteration count from eval_dir's name (<iter>-G) and the resume points and
+loop time up to that iteration from the training log. Writes
+results/tables_<ckpt>.tex by default. The tables use booktabs:
+\\usepackage{booktabs}.
 """
+import argparse
 import ast
 import csv
 import os
+import re
 import sys
 from collections import Counter
 
@@ -23,12 +33,41 @@ from ml_core.dataset import get_age_group, get_loaders
 AGES = ['0--10', '11--20', '21--30', '31--40', '41--50', '51+']  # get_age_group()
 GENDERS = ['Male', 'Female']  # UTKFace filename codes 0-1
 RACES = ['White', 'Black', 'Asian', 'Indian', 'Others']  # UTKFace filename codes 0-4
-eval_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'results', 'eval', '100000-G')
+parser = argparse.ArgumentParser(description='LaTeX tables for the paper.')
+parser.add_argument('eval_dir', nargs='?', default=os.path.join(ROOT, 'results', 'eval', '100000-G'))
+parser.add_argument('out', nargs='?')
+parser.add_argument('image_dir', nargs='?', default=os.path.join(ROOT, 'ml_core', 'data', 'utkface'))
+parser.add_argument('log_path', nargs='?', default=os.path.join(ROOT, 'train_log.txt'))
+# train.py flags the run changed; absent means the run used train.py's default
+parser.add_argument('--seed', type=int)
+parser.add_argument('--lambda-rec', type=float)
+parser.add_argument('--lambda-cls', type=float)
+parser.add_argument('--lambda-gp', type=float)
+args = parser.parse_args()
+eval_dir, image_dir, log_path = args.eval_dir, args.image_dir, args.log_path
 ckpt = os.path.basename(os.path.normpath(eval_dir))
-out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, 'results', f'tables_{ckpt}.tex')
-image_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.join(ROOT, 'ml_core', 'data', 'utkface')
+out = args.out or os.path.join(ROOT, 'results', f'tables_{ckpt}.tex')
 
-# Setup: train.py's argparse defaults plus its fixed architecture (the run used no flags)
+# Runs in the training log up to this checkpoint: [start iteration, --num-iters,
+# loop seconds at the last logged iteration <= the checkpoint]. Elapsed restarts
+# at 0 in each run, so the training time is the sum over runs.
+ckpt_iter = int(re.match(r'\d+', ckpt)[0])
+raw = open(log_path, 'rb').read()
+log = raw.decode('utf-16' if raw[:2] in (b'\xff\xfe', b'\xfe\xff') else 'utf-8', errors='ignore')
+runs = []
+for line in log.splitlines():
+    if m := re.search(r'Starting training from iteration (\d+)', line):
+        runs.append([int(m[1]), None, 0])
+    elif m := re.search(r'Elapsed \[(?:(\d+) days?, )?(\d+):(\d+):(\d+)\], Iteration \[(\d+)/(\d+)\]', line):
+        days, h, mi, s, i, n = (int(x or 0) for x in m.groups())
+        if runs and i <= ckpt_iter:
+            runs[-1][1:] = [n, ((days * 24 + h) * 60 + mi) * 60 + s]
+runs = [r for r in runs if r[0] < ckpt_iter]
+resumes = [r[0] for r in runs if r[0] > 0]
+mins, secs = divmod(sum(r[2] for r in runs), 60)
+
+# Setup: train.py's argparse defaults plus its fixed architecture, with any
+# flag values the run changed (--seed etc. above) put in their place
 d = {}
 for node in ast.walk(ast.parse(open(os.path.join(ROOT, 'ml_core', 'train.py')).read())):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -40,7 +79,18 @@ for node in ast.walk(ast.parse(open(os.path.join(ROOT, 'ml_core', 'train.py')).r
                 pass
         elif node.func.attr == 'update' and node.args and isinstance(node.args[0], ast.Dict):
             d.update(ast.literal_eval(node.args[0]))
-setup = [('Iterations', f"{d['num-iters']:,}"), ('Batch size', d['batch-size']),
+# Only values that differ from the default count as changed, so passing a
+# default explicitly leaves the tables byte-identical
+changed = []
+for flag in ('seed', 'lambda-rec', 'lambda-cls', 'lambda-gp'):
+    value = getattr(args, flag.replace('-', '_'))
+    if value is not None and value != d[flag]:
+        d[flag] = value
+        changed.append(rf'\texttt{{--{flag} {value:g}}}')
+setup = [('Iterations', f'{ckpt_iter:,}'),
+         ('Training time (loop, from the log)', f'{mins // 60} h {mins % 60:02d} min {secs:02d} s')]
+setup += [('Resumed from iteration', ', '.join(f'{r:,}' for r in resumes))] if resumes else []
+setup += [('Batch size', d['batch-size']),
          ('Critic steps per generator step', d['n-critic']),
          ('Optimizer', rf"Adam, $\beta_1 = {d['beta1']}$, $\beta_2 = {d['beta2']}$"),
          ('Learning rate (G, D)', f"{d['g-lr']:g}, {d['d-lr']:g}"),
@@ -116,10 +166,22 @@ for title, codes, names in (('Gender', gender, GENDERS), ('Race', race, RACES)):
 n_unlabeled = race.count(None)
 unlabeled = f' Validation images whose filenames lack these labels are left out ({n_unlabeled}).' if n_unlabeled else ''
 n_real = [int(m['n_real']) for m in metrics]
+if ckpt_iter == d['num-iters'] and not resumes:
+    changed_iters = []
+else:
+    changed_iters = [rf"the iteration count (\texttt{{--num-iters {runs[-1][1]}}})"]
+if not changed + changed_iters:
+    setup_caption = r'the defaults of \texttt{train.py}, which the reported run used unchanged'
+else:
+    exceptions = changed + changed_iters
+    setup_caption = (r'the defaults of \texttt{train.py} except '
+                     + (', '.join(exceptions[:-1]) + ' and ' if len(exceptions) > 1 else '') + exceptions[-1]
+                     + (rf"; training was resumed from iteration {', '.join(f'{r:,}' for r in resumes)} with the"
+                        r' weights and Adam state restored' if resumes else ''))
 
 TEMPLATE = r"""\begin{table}[t]
 \centering
-\caption{Training setup: the defaults of \texttt{train.py}, which the reported run used unchanged.}
+\caption{Training setup: @SETUPCAP@.}
 \label{tab:setup}
 \begin{tabular}{ll}
 \toprule
@@ -180,7 +242,7 @@ Subgroup & N & Real & Generated & ArcFace $\uparrow$ \\
 \end{tabular}
 \end{table}
 """
-tex = (TEMPLATE.replace('@SETUP@', '\n'.join(rf'{k} & {v} \\' for k, v in setup))
+tex = (TEMPLATE.replace('@SETUPCAP@', setup_caption).replace('@SETUP@', '\n'.join(rf'{k} & {v} \\' for k, v in setup))
        .replace('@TOTAL@', f'{train.total() + val.total():,}').replace('@SPLIT@', '\n'.join(split))
        .replace('@NVAL@', f'{len(val_names):,}').replace('@CKPT@', ckpt.replace('_', r'\_'))
        .replace('@KID@', str(min(1000, *n_real)))  # evaluate.py's KID subset size rule

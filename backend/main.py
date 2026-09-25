@@ -11,7 +11,12 @@ import os
 
 # Ensure ml_core is accessible
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ml_core.inference import AgeProgressor
+from ml_core.inference import AgeProgressor, NoFaceDetectedError
+
+NO_FACE_DETAIL = (
+    "No face detected in the uploaded image. Use a photo where a face is "
+    "clearly visible and facing the camera."
+)
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 # The client-declared content type is only a label: without restricting the
@@ -84,6 +89,13 @@ def decode_upload(contents: bytes) -> Image.Image:
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.")
 
 
+def encode_jpeg(image: Image.Image) -> str:
+    # Quality 95: the default 75 adds visible block artifacts at 128x128
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG", quality=95)
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
 @app.get("/")
 def read_root():
     return {
@@ -132,17 +144,19 @@ def progress_age(
     image = decode_upload(contents)
 
     try:
-        # Process the image
-        output_image = progressor.progress_age(image, target_age_group)
+        # The model only knows UTKFace-style crops: find the largest face,
+        # level and crop it, then age that crop
+        aligned_image, output_image = progressor.align_and_progress(image, target_age_group)
 
-        # Convert output image to base64. Quality 95: the default 75 adds
-        # visible block artifacts at 128x128.
-        buffered = io.BytesIO()
-        output_image.save(buffered, format="JPEG", quality=95)
-        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        return {
+            "status": "success",
+            "image_base64": encode_jpeg(output_image),
+            # What the model actually saw, so the UI can show it beside the result
+            "aligned_image_base64": encode_jpeg(aligned_image),
+        }
 
-        return {"status": "success", "image_base64": img_str}
-
+    except NoFaceDetectedError:
+        raise HTTPException(status_code=400, detail=NO_FACE_DETAIL)
     except Exception:
         # Log the details server-side; never echo internals to the client
         traceback.print_exc()

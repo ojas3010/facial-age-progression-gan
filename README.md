@@ -16,6 +16,7 @@ Identity-preserving facial age progression and regression using a multi-domain c
 - [Running the Application](#running-the-application)
 - [API Reference](#api-reference)
 - [Training](#training)
+- [Reproducing the paper results](#reproducing-the-paper-results)
 - [Model Details](#model-details)
 - [Testing](#testing)
 - [Continuous Integration](#continuous-integration)
@@ -41,7 +42,7 @@ flowchart LR
     API -- JSON response --> UI
 ```
 
-The backend loads `ml_core/models/latest-G.ckpt` once at startup (FastAPI lifespan). Every request is validated (MIME type, payload size, domain range, decoded image format and dimensions) before touching the model. Uploads are rotated upright from their EXIF orientation, then scaled and center-cropped to a 128 × 128 square (training faces are square crops, so squashing a non-square photo would distort it). Inference runs in a worker thread, on GPU when CUDA is available, otherwise CPU.
+The backend loads `ml_core/models/latest-G.ckpt` once at startup (FastAPI lifespan). Every request is validated (MIME type, payload size, domain range, decoded image format and dimensions) before touching the model. Uploads are rotated upright from their EXIF orientation, then aligned to the framing of UTKFace's aligned & cropped training faces: the OpenCV YuNet detector (`ml_core/assets/`) finds the largest face, the image is rotated so the eyes are level, and the face is cropped to 128 × 128 with its eyes, nose and mouth fitted to UTKFace's average landmark positions (measured by `scripts/calibrate_face_template.py`). A photo with no detectable face is rejected. Inference runs in a worker thread, on GPU when CUDA is available, otherwise CPU.
 
 ## Repository Structure
 
@@ -110,19 +111,23 @@ Multipart form request.
 | `file` | image | JPEG / PNG / WEBP, max 5 MB, max 50 megapixels |
 | `target_age_group` | integer | 0–5 (see age domain table) |
 
-The format is checked twice: the declared content type must be one of the three, and the bytes must actually decode as one of them (a GIF or TIFF sent as `image/png` is rejected). The output is a 128 × 128 JPEG.
+The format is checked twice: the declared content type must be one of the three, and the bytes must actually decode as one of them (a GIF or TIFF sent as `image/png` is rejected). The response carries two 128 × 128 JPEGs: the aged face, and the aligned face crop the model received as input.
 
 **Success** — `200`:
 
 ```json
-{ "status": "success", "image_base64": "<jpeg bytes, base64>" }
+{
+  "status": "success",
+  "image_base64": "<aged face, jpeg bytes, base64>",
+  "aligned_image_base64": "<aligned input crop, jpeg bytes, base64>"
+}
 ```
 
 **Errors**:
 
 | Status | Cause |
 |--------|-------|
-| 400 | Unsupported file type, payload over 5 MB, image over 50 megapixels, or corrupt/truncated image bytes |
+| 400 | Unsupported file type, payload over 5 MB, image over 50 megapixels, corrupt/truncated image bytes, or no face detected in the image |
 | 422 | `target_age_group` outside 0–5 or not an integer |
 | 500 | Model not initialized or inference failure |
 
@@ -215,6 +220,50 @@ At every checkpoint, a fixed batch of 8 real images is translated to all 6 age d
 | Generator / Discriminator LR | 1e-4 (Adam, β₁ 0.5, β₂ 0.999) |
 | Critic steps per generator step (`n_critic`) | 5 |
 | λ classification / reconstruction / gradient penalty | 1 / 10 / 10 |
+
+## Reproducing the paper results
+
+The paper reports checkpoint `300000-G` for three seeds: 42 (in `ml_core/models`, evaluated into `results/eval/300000-G`), 2 and 3 (in `runs/seedN/`). Commands are for Windows PowerShell from the repo root.
+
+### Seeds 2 and 3
+
+Seed 42 trained 100,000 iterations, then resumed to 300,000. A resume re-applies the seed, so iterations 100k–200k replay the random draws of 0–100k (data order, flips, target labels, gradient-penalty mixing). The other seeds follow the same two-part procedure, so the spread across seeds measures the seed alone. The second part starts only if the first exited cleanly, and resumes from its `100000` checkpoint.
+
+```powershell
+New-Item -ItemType Directory -Force runs\seed2 | Out-Null
+.venv\Scripts\python.exe -u ml_core\train.py --seed 2 --num-iters 100000 --model-save-dir runs\seed2\models | Tee-Object -FilePath runs\seed2\train_log.txt -Append
+if ($LASTEXITCODE -eq 0) { .venv\Scripts\python.exe -u ml_core\train.py --seed 2 --num-iters 300000 --model-save-dir runs\seed2\models | Tee-Object -FilePath runs\seed2\train_log.txt -Append }
+```
+
+```powershell
+New-Item -ItemType Directory -Force runs\seed3 | Out-Null
+.venv\Scripts\python.exe -u ml_core\train.py --seed 3 --num-iters 100000 --model-save-dir runs\seed3\models | Tee-Object -FilePath runs\seed3\train_log.txt -Append
+if ($LASTEXITCODE -eq 0) { .venv\Scripts\python.exe -u ml_core\train.py --seed 3 --num-iters 300000 --model-save-dir runs\seed3\models | Tee-Object -FilePath runs\seed3\train_log.txt -Append }
+```
+
+`--seed` never changes the train/val split, which stays pinned at 42, so every seed is evaluated on the same 4,741 val images.
+
+### Evaluation
+
+Shown for seed 2; for seed 3 replace `seed2` with `seed3` and `--seed 2` with `--seed 3`. Run after training has finished.
+
+```powershell
+.venv\Scripts\python.exe scripts\evaluate.py runs\seed2\models\300000-G.ckpt runs\seed2\eval\300000-G
+..\venv-mivolo\Scripts\python.exe scripts\age_mivolo.py runs\seed2\eval\300000-G
+.venv\Scripts\python.exe scripts\arcface_pairs.py runs\seed2\eval\300000-G
+.venv\Scripts\python.exe scripts\make_tables.py runs\seed2\eval\300000-G runs\seed2\eval\tables_300000-G.tex ml_core\data\utkface runs\seed2\train_log.txt --seed 2
+```
+
+1. `evaluate.py`: FID, KID and ArcFace per target age group (`metrics.csv`), plus the real and generated PNGs the next steps read. Uses the GPU if available.
+2. `age_mivolo.py`: MiVOLO v2 age estimates (`ages_mivolo.csv`). It runs in a separate CPU-only venv outside the repo (`..\venv-mivolo`), because MiVOLO v2 pins torch 2.5.1; see the script's docstring.
+3. `arcface_pairs.py`: ArcFace similarity per source-output pair (`arcface_pairs.csv`), for the gender and race breakdown.
+4. `make_tables.py`: the four LaTeX tables. The eval folder's name (`300000-G`) sets the iteration count; the log gives the training time and resume point. Pass any `train.py` flag the run changed (`--seed`, `--lambda-rec`, `--lambda-cls`, `--lambda-gp`), because the setup table otherwise shows `train.py`'s defaults.
+
+Mean ± sample std across seeds:
+
+```powershell
+.venv\Scripts\python.exe scripts\aggregate_seeds.py results\eval\300000-G runs\seed2\eval\300000-G runs\seed3\eval\300000-G --out results\seeds_300000-G.csv
+```
 
 ## Model Details
 

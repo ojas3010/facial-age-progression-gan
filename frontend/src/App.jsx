@@ -49,6 +49,7 @@ function App() {
   const [imageFile, setImageFile] = useState(null);
   const [targetAge, setTargetAge] = useState(2); // Default to 21-30
   const [resultImage, setResultImage] = useState(null);
+  const [alignedImage, setAlignedImage] = useState(null); // face crop the model actually saw
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [elapsedMs, setElapsedMs] = useState(null);
@@ -82,6 +83,7 @@ function App() {
     };
     reader.readAsDataURL(file);
     setResultImage(null); // Reset result on new upload
+    setAlignedImage(null);
     setError("");
   };
 
@@ -146,6 +148,7 @@ function App() {
 
       const data = await response.json();
       setResultImage(`data:image/jpeg;base64,${data.image_base64}`);
+      setAlignedImage(`data:image/jpeg;base64,${data.aligned_image_base64}`);
       setResultAge(requestAge);
       setElapsedMs(Math.round(performance.now() - t0));
     } catch (err) {
@@ -317,13 +320,28 @@ function App() {
                 </div>
               ) : resultImage ? (
                 <div className="state state--result">
-                  <img
-                    src={resultImage}
-                    alt={`Age-progressed result, ${AGE_GROUPS[resultAge]}`}
-                    className="result"
-                    width="600"
-                    height="400"
-                  />
+                  <div className="compare">
+                    <figure className="compare-item">
+                      <img
+                        src={alignedImage}
+                        alt="Detected face, aligned and cropped as model input"
+                        className="result"
+                        width="128"
+                        height="128"
+                      />
+                      <figcaption className="label">Aligned input</figcaption>
+                    </figure>
+                    <figure className="compare-item">
+                      <img
+                        src={resultImage}
+                        alt={`Age-progressed result, ${AGE_GROUPS[resultAge]}`}
+                        className="result"
+                        width="128"
+                        height="128"
+                      />
+                      <figcaption className="label">Progressed &middot; {AGE_GROUPS[resultAge]}</figcaption>
+                    </figure>
+                  </div>
                   {elapsedMs !== null && (
                     <dl className="readout">
                       <div className="readout-row">
