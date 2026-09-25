@@ -1,12 +1,16 @@
 """Unit tests for the ML core, mirroring the validation matrix in the
 project report (Table 8.1.1)."""
+import math
+import os
+
+import cv2
 import pytest
 import torch
 from PIL import Image
 import numpy as np
 
 from ml_core.dataset import get_age_group, get_loaders, UTKFaceDataset
-from ml_core.inference import AgeProgressor
+from ml_core.inference import AgeProgressor, FaceAligner, NoFaceDetectedError, UTKFACE_TEMPLATE
 from ml_core.model import Generator, Discriminator, generator_state_dict, label2onehot
 
 
@@ -151,3 +155,116 @@ def test_preprocessing_center_crops_instead_of_squashing():
     x = AgeProgressor().transform(img)
     assert x.shape == (3, 128, 128)
     assert x[0].max() < -0.9 and x[2].min() > 0.9  # no red anywhere, all blue
+
+
+# ----- face detection and alignment -----
+
+UTKFACE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "ml_core", "data", "utkface")
+needs_utkface = pytest.mark.skipif(not os.path.isdir(UTKFACE_DIR), reason="UTKFace not present (see README)")
+
+
+@pytest.fixture(scope="module")
+def aligner():
+    return FaceAligner(output_size=128)
+
+
+def place_face(side, angle_deg, center):
+    """Template landmarks for a face `side` px wide, rotated by angle_deg
+    (image coordinates, y down) about its middle and centred at `center`."""
+    a = math.radians(angle_deg)
+    rot = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    return (UTKFACE_TEMPLATE - 0.5) * side @ rot.T + center
+
+
+def face_row(landmarks, side):
+    """A detector row (x, y, w, h, landmarks, score) for place_face output."""
+    x, y = landmarks.mean(axis=0) - side / 2
+    return [x, y, side, side, *landmarks.ravel(), 0.99]
+
+
+def paint_eyes(image, landmarks, radius, color):
+    for x, y in landmarks[:2]:
+        cv2.circle(image, (round(x), round(y)), radius, color, -1)
+
+
+def test_alignment_levels_eyes_and_fits_template(aligner):
+    # A face tilted 25 degrees: after alignment the eyes must be level and
+    # every landmark on its template position
+    landmarks = place_face(600, 25, (900, 700))
+    m = aligner.alignment_matrix(landmarks)
+    mapped = landmarks @ m[:, :2].T + m[:, 2]
+    assert abs(mapped[1, 1] - mapped[0, 1]) < 1e-6
+    assert np.allclose(mapped, UTKFACE_TEMPLATE * 128, atol=1e-3)
+
+
+def test_alignment_warp_puts_pixels_on_template(aligner):
+    # 600 px face in a large photo: exercises the area-downsample path too
+    image = np.full((1400, 1800, 3), 40, np.uint8)
+    landmarks = place_face(600, -30, (900, 700))
+    paint_eyes(image, landmarks, 25, (255, 0, 0))
+    out = aligner.align(image, landmarks)
+    assert out.shape == (128, 128, 3)
+    for x, y in UTKFACE_TEMPLATE[:2] * 128:
+        r, g, b = out[round(y), round(x)].astype(int)
+        assert r > 200 and g < 60 and b < 60
+
+
+def test_aligner_keeps_largest_face(aligner, monkeypatch):
+    image = np.full((900, 1600, 3), 40, np.uint8)
+    small, large = place_face(150, 0, (300, 300)), place_face(450, 10, (1100, 500))
+    paint_eyes(image, small, 8, (255, 0, 0))
+    paint_eyes(image, large, 20, (0, 255, 0))
+    # Small face listed first, and more confident: size alone must decide
+    rows = np.array([face_row(small, 150), face_row(large, 450)], dtype=np.float32)
+    rows[0, 14] = 1.0
+    monkeypatch.setattr(aligner, "detect_faces", lambda _: rows)
+    out = np.asarray(aligner(Image.fromarray(image)))
+    x, y = (UTKFACE_TEMPLATE[0] * 128).round().astype(int)
+    r, g, b = out[y, x].astype(int)
+    assert g > 200 and r < 60
+
+
+def test_aligner_raises_when_no_face(aligner):
+    flat = Image.new("RGB", (320, 240), (128, 100, 90))
+    noise = Image.fromarray(np.random.default_rng(0).integers(0, 256, (240, 320, 3), dtype=np.uint8))
+    for image in (flat, noise):
+        with pytest.raises(NoFaceDetectedError):
+            aligner(image)
+
+
+def test_aligner_rejects_wrong_model_file(tmp_path):
+    # e.g. the 131-byte git-LFS pointer saved in place of the model
+    path = tmp_path / "face_detection_yunet_2026may.onnx"
+    path.write_text("version https://git-lfs.github.com/spec/v1\n")
+    with pytest.raises(RuntimeError, match="SHA-256"):
+        FaceAligner(model_path=str(path))
+
+
+def test_align_and_progress_returns_aligned_input_and_output(monkeypatch):
+    progressor = AgeProgressor()
+    landmarks = place_face(300, 15, (320, 240))
+    rows = np.array([face_row(landmarks, 300)], dtype=np.float32)
+    monkeypatch.setattr(progressor.aligner, "detect_faces", lambda _: rows)
+    aligned, aged = progressor.align_and_progress(Image.new("RGB", (640, 480)), 3)
+    assert aligned.size == aged.size == (128, 128)
+
+
+@needs_utkface
+def test_detect_faces_maps_downscaled_detection_back_to_photo(aligner):
+    # A UTKFace crop enlarged 3x inside a phone-sized photo: detection runs
+    # on a padded, downscaled copy, and must report original coordinates
+    for name in sorted(os.listdir(UTKFACE_DIR))[:20]:
+        face = cv2.imread(os.path.join(UTKFACE_DIR, name))
+        ref = aligner.detect_faces(face)
+        if len(ref):
+            break
+    photo = np.full((3000, 2400, 3), 90, np.uint8)
+    photo[1000:1600, 700:1300] = cv2.resize(face, (600, 600), interpolation=cv2.INTER_CUBIC)
+    found = aligner.detect_faces(photo)
+    assert len(found) >= 1
+    got = found[np.argmax(found[:, 2] * found[:, 3])]
+    expected = ref[0, 4:14].reshape(5, 2) * 3 + [700, 1000]
+    # Detector jitter differs between scales; a pad or scale bug is off by
+    # hundreds of pixels
+    assert np.abs(got[4:14].reshape(5, 2) - expected).max() < 30

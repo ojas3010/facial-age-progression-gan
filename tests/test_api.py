@@ -2,12 +2,18 @@
 rules and error codes as specified in the project report (chapter 4)."""
 import base64
 import io
+import os
 
+import numpy as np
 import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 
-from backend.main import app, decode_upload
+from backend.main import NO_FACE_DETAIL, app, decode_upload
+from ml_core.inference import UTKFACE_TEMPLATE
+
+UTKFACE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "ml_core", "data", "utkface")
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +41,34 @@ def post_image(client, data, content_type="image/jpeg", age="2"):
     )
 
 
+def assert_rejected(r, detail_fragment):
+    # Status alone is not enough: an upload with no face is also a 400, so a
+    # broken validator would still "pass" via the face check
+    assert r.status_code == 400
+    assert detail_fragment in r.json()["detail"]
+
+
+def decode_jpeg(b64):
+    image = Image.open(io.BytesIO(base64.b64decode(b64)))
+    assert image.format == "JPEG"
+    return image
+
+
+@pytest.fixture
+def face_found(client, monkeypatch):
+    """Stub the detector to report one face filling the image, so tests of
+    the upload contract can use synthetic images. Only detection is faked;
+    the alignment warp and the generator still run."""
+    import backend.main as backend_main
+
+    def detect_faces(image_bgr):
+        side = min(image_bgr.shape[:2])
+        landmarks = (UTKFACE_TEMPLATE * side).ravel()
+        return np.array([[0, 0, side, side, *landmarks, 0.99]], dtype=np.float32)
+
+    monkeypatch.setattr(backend_main.progressor.aligner, "detect_faces", detect_faces)
+
+
 def test_health_check(client):
     import backend.main as backend_main
 
@@ -44,7 +78,7 @@ def test_health_check(client):
     assert r.json()["model_loaded"] is backend_main.progressor.weights_loaded
 
 
-def test_progress_age_success(client):
+def test_progress_age_success(client, face_found):
     r = client.post(
         "/api/progress_age",
         files={"file": ("face.jpg", jpeg_bytes(), "image/jpeg")},
@@ -53,11 +87,34 @@ def test_progress_age_success(client):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "success"
-    assert isinstance(body["image_base64"], str) and len(body["image_base64"]) > 0
-    # Payload must decode to an actual 128x128 JPEG, not arbitrary bytes
-    out = Image.open(io.BytesIO(base64.b64decode(body["image_base64"])))
-    assert out.format == "JPEG"
-    assert out.size == (128, 128)
+    # Both payloads must decode to actual 128x128 JPEGs, not arbitrary bytes:
+    # the aged face, and the aligned crop the UI shows beside it
+    for key in ("image_base64", "aligned_image_base64"):
+        assert isinstance(body[key], str) and len(body[key]) > 0
+        assert decode_jpeg(body[key]).size == (128, 128)
+
+
+def test_rejects_image_without_face(client):
+    # Real detector: a flat colour and pure noise contain no face
+    flat = image_bytes("JPEG", size=(320, 240))
+    noise = io.BytesIO()
+    Image.fromarray(np.random.default_rng(0).integers(0, 256, (240, 320, 3), dtype=np.uint8)).save(noise, "PNG")
+    for data in (flat, noise.getvalue()):
+        r = post_image(client, data)
+        assert r.status_code == 400
+        assert r.json()["detail"] == NO_FACE_DETAIL
+
+
+@pytest.mark.skipif(not os.path.isdir(UTKFACE_DIR), reason="UTKFace not present (see README)")
+def test_progress_age_real_face(client):
+    # End to end with the real detector, no stubs
+    name = sorted(f for f in os.listdir(UTKFACE_DIR) if f.endswith(".jpg"))[0]
+    with open(os.path.join(UTKFACE_DIR, name), "rb") as f:
+        r = post_image(client, f.read())
+    assert r.status_code == 200
+    body = r.json()
+    assert decode_jpeg(body["image_base64"]).size == (128, 128)
+    assert decode_jpeg(body["aligned_image_base64"]).size == (128, 128)
 
 
 def test_rejects_unsupported_mime_type(client):
@@ -66,7 +123,7 @@ def test_rejects_unsupported_mime_type(client):
         files={"file": ("evil.txt", b"not an image", "text/plain")},
         data={"target_age_group": "2"},
     )
-    assert r.status_code == 400
+    assert_rejected(r, "Unsupported file type")
 
 
 def test_rejects_out_of_range_age_group(client):
@@ -93,7 +150,7 @@ def test_rejects_oversized_payload(client):
         files={"file": ("big.jpg", b"\xff" * (5 * 1024 * 1024 + 1), "image/jpeg")},
         data={"target_age_group": "2"},
     )
-    assert r.status_code == 400
+    assert_rejected(r, "File too large")
 
 
 def test_rejects_corrupt_image_bytes(client):
@@ -102,23 +159,23 @@ def test_rejects_corrupt_image_bytes(client):
         files={"file": ("fake.jpg", b"definitely not jpeg data", "image/jpeg")},
         data={"target_age_group": "2"},
     )
-    assert r.status_code == 400
+    assert_rejected(r, "not a valid image")
 
 
 def test_rejects_truncated_image(client):
     # Valid JPEG header, missing pixel data: fails at decode, not at open()
     data = jpeg_bytes()
-    assert post_image(client, data[: len(data) // 2]).status_code == 400
+    assert_rejected(post_image(client, data[: len(data) // 2]), "not a valid image")
 
 
 def test_rejects_disallowed_format_behind_allowed_mime_type(client):
     # The client-declared content type is only a label; the decoder must
     # be restricted too
-    assert post_image(client, image_bytes("GIF"), "image/png").status_code == 400
-    assert post_image(client, image_bytes("TIFF"), "image/jpeg").status_code == 400
+    assert_rejected(post_image(client, image_bytes("GIF"), "image/png"), "not a valid image")
+    assert_rejected(post_image(client, image_bytes("TIFF"), "image/jpeg"), "not a valid image")
 
 
-def test_accepts_png_labeled_as_jpeg(client):
+def test_accepts_png_labeled_as_jpeg(client, face_found):
     # Misnamed files are common; any allowed format passes under any allowed type
     assert post_image(client, image_bytes("PNG"), "image/jpeg").status_code == 200
 
@@ -127,7 +184,7 @@ def test_rejects_oversized_dimensions(client):
     # A few KB on the wire, 60 MP once decoded
     data = image_bytes("PNG", size=(10000, 6000), mode="1")
     assert len(data) < 1024 * 1024
-    assert post_image(client, data, "image/png").status_code == 400
+    assert_rejected(post_image(client, data, "image/png"), "dimensions too large")
 
 
 def test_decode_upload_applies_exif_orientation():

@@ -5,3 +5,7 @@ uvicorn>=0.30,<1
 python-multipart>=0.0.9,<0.1
 Pillow>=10
 numpy>=1.26
+# Face detection/alignment (YuNet via cv2.FaceDetectorYN). Headless: the
+# server needs no GUI and it avoids libGL on Linux. 5.x: the bundled dynamic-
+# shape YuNet export targets OpenCV 5's ONNX engine.
+opencv-python-headless>=5.0,<6
